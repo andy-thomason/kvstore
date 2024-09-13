@@ -1,5 +1,6 @@
-use file_spec::FilePage;
+use file_spec::{FilePage, IndexHeaderV1, LeafHeaderV1, LeafPage};
 use memory_storage::MemoryStorage;
+use crate::file_spec::Magic;
 
 mod file_spec;
 
@@ -28,7 +29,7 @@ pub enum Error {
 }
 
 pub trait Get {
-    fn get(&mut self, key: &[u8], buf: &mut [u8]) -> Result<Option<usize>, Error>;
+    fn get(&self, key: &[u8], res: &mut [u8]) -> Result<Option<usize>, Error>;
 }
 
 pub trait Set {
@@ -70,14 +71,14 @@ impl<const PAGE_SIZE: usize> KvStore<memory_storage::MemoryStorage, PAGE_SIZE> {
 }
 
 impl<const PAGE_SIZE: usize, S: Storage> KvStore<S, PAGE_SIZE> {
-    fn read(&mut self, page: u64, buf: &mut [u8; PAGE_SIZE]) -> Result<(), Error> {
+    fn read(&self, page: u64, buf: &mut [u8; PAGE_SIZE]) -> Result<(), Error> {
         self.storage.read(page * (PAGE_SIZE as u64), buf)?;
         Ok(())
     }
 }
 
 impl<S: Storage, const PAGE_SIZE: usize> Get for KvStore<S, PAGE_SIZE> {
-    fn get(&mut self, key: &[u8], buf: &mut [u8]) -> Result<Option<usize>, Error> {
+    fn get(&self, key: &[u8], res: &mut [u8]) -> Result<Option<usize>, Error> {
         let mut buf = [0; PAGE_SIZE];
         self.read(0, &mut buf)?;
         let file_page = FilePage::from_buf(&mut buf).bad()?;
@@ -87,8 +88,19 @@ impl<S: Storage, const PAGE_SIZE: usize> Get for KvStore<S, PAGE_SIZE> {
             return Ok(None);
         }
 
+        let mut buf = [0; PAGE_SIZE];
         self.read(file_hdr.index_page.as_u64(), &mut buf)?;
-        Ok(None)
+        match buf[0..4].try_into().unwrap() {
+            LeafHeaderV1::MAGIC_VALUE => {
+                let leaf_page = LeafPage::from_buf(&mut buf).bad()?;
+                leaf_page.get(key, res).bad()
+            }
+            IndexHeaderV1::MAGIC_VALUE => {
+                let index_page = LeafPage::from_buf(&mut buf).bad()?;
+                index_page.get(key, res).bad()
+            }
+            _ => return Err(Error::Bad),
+        }
     }
 }
 
@@ -105,7 +117,8 @@ mod test {
 
     #[test]
     fn smoke() {
-        let mut kv = KvStore::<_, 0x1000>::in_memory(0x10000).unwrap();
+        let mut kv =
+            KvStore::<_, 0x100>::in_memory(0x1000).unwrap();
 
         assert_eq!(kv.set(b"abc", b"def"), Ok(()));
         let mut rbuf = [0; 4];
